@@ -23,10 +23,12 @@ on:
                 default: ""
 
 # The agent may open a PR / push a branch, so grant the minimum needed.
+# id-token: write is required by claude-code-action to fetch an OIDC token.
 permissions:
     contents: write
     pull-requests: write
     issues: read
+    id-token: write
 
 jobs:
     run-agent:
