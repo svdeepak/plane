@@ -67,10 +67,40 @@ jobs:
                       --max-turns 15
                       --allowedTools "Read,Edit,Write,Glob,Grep"
 
-            - name: Show what changed
+            - name: Show what changed (full diff) and open a PR
               if: always()
+              env:
+                  GH_TOKEN: ${{ github.token }}
               run: |
                   echo "=== git status ==="
                   git status --porcelain
-                  echo "=== diff (docs only expected) ==="
-                  git --no-pager diff --stat
+                  echo ""
+                  echo "=== FULL diff (this is exactly what the agent wrote) ==="
+                  git --no-pager diff
+                  echo ""
+                  # Also write the full diff into the run summary so it's viewable in the UI.
+                  {
+                      echo "## What the agent changed"
+                      echo '```diff'
+                      git --no-pager diff
+                      echo '```'
+                  } >> "$GITHUB_STEP_SUMMARY"
+
+                  # Persist the change as a reviewable PR (only if the agent actually changed something).
+                  if [ -n "$(git status --porcelain)" ]; then
+                      BRANCH="agent/demo-$(date +%s)"
+                      git config user.name "coding-agent-ci"
+                      git config user.email "coding-agent-ci@users.noreply.github.com"
+                      git checkout -b "$BRANCH"
+                      git add -A
+                      git commit -m "docs: agent-generated change from fixed-prompt CI demo"
+                      git push origin "$BRANCH"
+                      gh pr create \
+                          --base "${{ github.ref_name }}" \
+                          --head "$BRANCH" \
+                          --title "Agent demo: fixed-prompt change" \
+                          --body "Automated change produced by the Coding Agent — Fixed Prompt Demo workflow (task 18). Review the diff; close without merging if this is just a demo run."
+                      echo "Opened a PR from $BRANCH — the agent's change is now persisted and reviewable."
+                  else
+                      echo "Agent made no changes; nothing to open a PR for."
+                  fi
