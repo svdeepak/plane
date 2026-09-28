@@ -46,9 +46,13 @@ jobs:
             # default below is the fixed prompt the task calls for.
             - name: Resolve prompt
               id: prompt
+              env:
+                  # Pass the user input via env so the shell never parses its
+                  # quotes/backticks — prevents injection and word-splitting bugs.
+                  INPUT_PROMPT: ${{ github.event.inputs.prompt }}
               run: |
                   DEFAULT_PROMPT="Add a short 'Running the coding agent in CI' section near the top of CONTRIBUTING.md (create the file if it does not exist) that explains, in 4-6 bullet points readable by a non-engineer, how this repository invokes an AI coding agent from GitHub Actions. Do not modify any source code. Keep the change to documentation only."
-                  CHOSEN="${{ github.event.inputs.prompt }}"
+                  CHOSEN="$INPUT_PROMPT"
                   if [ -z "$CHOSEN" ]; then CHOSEN="$DEFAULT_PROMPT"; fi
                   # Multi-line-safe output
                   {
