@@ -1,0 +1,132 @@
+# Task 19 — Pass or fail the build based on a coding agent's analysis prompt.
+#
+# Mechanism (the important part):
+#   1. Run Claude Code headlessly with `-p` and force JSON output.
+#   2. The prompt (.ci/analysis-prompt.md) constrains the agent to emit a strict
+#      verdict object: {"verdict":"PASS"|"FAIL", ...} as its final line.
+#   3. A plain shell step parses that verdict with jq and calls `exit 1` on FAIL.
+#      The non-zero exit is what turns the CI check red and can block a merge.
+#
+# This mirrors the repo's own check-version.yml, which already fails CI with
+# `exit 1` when a condition is not met — we just use an agent to decide the
+# condition instead of a version string.
+#
+# Auth: Claude subscription OAuth token, stored as secret CLAUDE_CODE_OAUTH_TOKEN
+#   (generate with `claude setup-token`).
+#
+# NOTE: starts as workflow_dispatch so we can demonstrate it passing AND failing
+# on purpose. To make it a real merge gate, add a `pull_request:` trigger and
+# mark the job as a required status check in branch protection.
+
+name: Coding Agent — Analysis Gate
+
+on:
+    workflow_dispatch:
+    # Uncomment to make this a real PR gate once trusted:
+    # pull_request:
+    #     branches: ["preview"]
+
+permissions:
+    contents: read
+    pull-requests: read
+
+jobs:
+    analysis-gate:
+        name: Agent analysis gate (secret leak check)
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0 # need history to diff against base
+
+            - name: Compute the diff to analyse
+              id: diff
+              run: |
+                  # For a PR, diff against the base; for manual runs, diff the last commit.
+                  if [ -n "${{ github.base_ref }}" ]; then
+                      git fetch origin "${{ github.base_ref }}" --depth 1
+                      DIFF=$(git diff "origin/${{ github.base_ref }}"...HEAD)
+                  else
+                      DIFF=$(git diff HEAD~1..HEAD || git show HEAD)
+                  fi
+                  # Persist the diff to a file the agent can read.
+                  printf '%s\n' "$DIFF" > /tmp/pr.diff
+                  echo "Diff size: $(wc -l < /tmp/pr.diff) lines"
+
+            - name: Install Claude Code CLI
+              run: npm install -g @anthropic-ai/claude-code
+
+            - name: Run agent analysis (headless, JSON output)
+              id: analyse
+              env:
+                  CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+              run: |
+                  set -o pipefail
+                  PROMPT="$(cat .ci/analysis-prompt.md)
+
+                  === BEGIN DIFF ===
+                  $(cat /tmp/pr.diff)
+                  === END DIFF ==="
+
+                  # Headless run. --output-format json wraps the result;
+                  # we then extract the agent's text and the final verdict line.
+                  claude -p "$PROMPT" \
+                      --output-format json \
+                      --max-turns 8 \
+                      --allowedTools "Read,Grep" \
+                      > /tmp/agent-out.json
+
+                  echo "=== raw agent output ==="
+                  cat /tmp/agent-out.json
+
+                  # The CLI's JSON envelope has a `.result` string containing the
+                  # agent's text; the verdict JSON is the last {...} in that text.
+                  RESULT_TEXT=$(jq -r '.result // .text // .' /tmp/agent-out.json 2>/dev/null || cat /tmp/agent-out.json)
+                  VERDICT_JSON=$(printf '%s' "$RESULT_TEXT" | grep -oE '\{.*"verdict".*\}' | tail -1)
+
+                  if [ -z "$VERDICT_JSON" ]; then
+                      echo "::error::Could not find a verdict JSON in the agent output."
+                      echo "verdict=ERROR" >> "$GITHUB_OUTPUT"
+                      exit 3   # distinct from analysis FAIL: agent/parse failure
+                  fi
+
+                  echo "Parsed verdict JSON: $VERDICT_JSON"
+                  echo "$VERDICT_JSON" > /tmp/verdict.json
+                  V=$(jq -r '.verdict' /tmp/verdict.json)
+                  echo "verdict=$V" >> "$GITHUB_OUTPUT"
+
+            - name: Report verdict to the run summary
+              if: always()
+              run: |
+                  {
+                      echo "## Agent Analysis Gate"
+                      if [ -f /tmp/verdict.json ]; then
+                          echo "- **Verdict:** $(jq -r '.verdict' /tmp/verdict.json)"
+                          echo "- **Reason:** $(jq -r '.reason' /tmp/verdict.json)"
+                          echo '```json'
+                          jq '.findings' /tmp/verdict.json 2>/dev/null || true
+                          echo '```'
+                      else
+                          echo "- No verdict produced (agent or parse error)."
+                      fi
+                  } >> "$GITHUB_STEP_SUMMARY"
+
+            - name: Gate the build on the verdict
+              run: |
+                  V="${{ steps.analyse.outputs.verdict }}"
+                  echo "Agent verdict: $V"
+                  case "$V" in
+                      PASS)
+                          echo "✅ Analysis passed — build is green."
+                          exit 0
+                          ;;
+                      FAIL)
+                          echo "::error::❌ Agent analysis FAILED the build. See summary for findings."
+                          exit 1
+                          ;;
+                      *)
+                          echo "::error::⚠️ Agent did not return a valid verdict (got '$V'). Failing closed."
+                          exit 1
+                          ;;
+                  esac

@@ -1,0 +1,74 @@
+# Task 18 — Invoke a coding agent (Claude Code) against a fixed prompt on CI.
+#
+# This workflow demonstrates the "coding agent in the build pipeline" pattern.
+# It runs the official Claude Code GitHub Action in "agent mode" (a `prompt:`
+# input is supplied, so it runs non-interactively without needing an @claude
+# mention) against a FIXED prompt of our choosing.
+#
+# Auth: uses a Claude subscription OAuth token (no metered API key).
+#   Generate locally with:  claude setup-token
+#   Then store it in the fork:  Settings > Secrets and variables > Actions
+#     Secret name:  CLAUDE_CODE_OAUTH_TOKEN
+#
+# Trigger: manual only (workflow_dispatch) — safest for a demo; no cost on push.
+
+name: Coding Agent — Fixed Prompt Demo
+
+on:
+    workflow_dispatch:
+        inputs:
+            prompt:
+                description: "Prompt to send the agent (defaults to the fixed prompt below)"
+                required: false
+                default: ""
+
+# The agent may open a PR / push a branch, so grant the minimum needed.
+permissions:
+    contents: write
+    pull-requests: write
+    issues: read
+
+jobs:
+    run-agent:
+        name: Run Claude Code against a fixed prompt
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 1
+
+            # The fixed "prompt of choice" for this task. Low-risk and
+            # produces a visible, reviewable artifact (a docs addition).
+            # An input override is allowed for experimentation, but the
+            # default below is the fixed prompt the task calls for.
+            - name: Resolve prompt
+              id: prompt
+              run: |
+                  DEFAULT_PROMPT="Add a short 'Running the coding agent in CI' section near the top of CONTRIBUTING.md (create the file if it does not exist) that explains, in 4-6 bullet points readable by a non-engineer, how this repository invokes an AI coding agent from GitHub Actions. Do not modify any source code. Keep the change to documentation only."
+                  CHOSEN="${{ github.event.inputs.prompt }}"
+                  if [ -z "$CHOSEN" ]; then CHOSEN="$DEFAULT_PROMPT"; fi
+                  # Multi-line-safe output
+                  {
+                    echo "value<<PROMPT_EOF"
+                    echo "$CHOSEN"
+                    echo "PROMPT_EOF"
+                  } >> "$GITHUB_OUTPUT"
+
+            - name: Run Claude Code (agent mode)
+              uses: anthropics/claude-code-action@v1
+              with:
+                  claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+                  prompt: ${{ steps.prompt.outputs.value }}
+                  # Constrain the agent: limit turns, restrict tools to safe ones.
+                  claude_args: |
+                      --max-turns 15
+                      --allowedTools "Read,Edit,Write,Glob,Grep"
+
+            - name: Show what changed
+              if: always()
+              run: |
+                  echo "=== git status ==="
+                  git status --porcelain
+                  echo "=== diff (docs only expected) ==="
+                  git --no-pager diff --stat
